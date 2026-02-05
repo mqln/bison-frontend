@@ -4,28 +4,17 @@ import { SimulationState } from "../models/Simulation";
 import { NumericGrid } from "../models/Grid";
 import { SimulationCanvas } from "./components/SimulationCanvas";
 
-// Use environment variable for API URL, fallback to localhost for development
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3001/api";
-
-interface GridInfo {
-  width: number;
-  height: number;
-  cellSizeKm: number;
-  totalCells: number;
-}
-
 interface YearState {
   year: number;
   biomass: number[][];
   population: number[][];
-  foodSatisfaction: number[][];
-  carryingCapacity: number[][];
 }
 
 export const App: React.FC = () => {
-  // Server state
-  const [serverStatus, setServerStatus] = useState<"checking" | "online" | "offline">("checking");
-  const [gridInfo, setGridInfo] = useState<GridInfo | null>(null);
+  // Pyodide worker state
+  const [pyodideStatus, setPyodideStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [loadingMessage, setLoadingMessage] = useState("Initializing...");
+  const workerRef = useRef<Worker | null>(null);
 
   // Simulation state
   const [isRunning, setIsRunning] = useState(false);
@@ -37,11 +26,12 @@ export const App: React.FC = () => {
 
   // Initial biomass
   const [initialBiomass, setInitialBiomass] = useState<number[][] | null>(null);
+  const [gridInfo, setGridInfo] = useState<{ width: number; height: number } | null>(null);
 
   // Display settings
   const [selectedVariable, setSelectedVariable] = useState<
     "biomass" | "population" | "carryingCapacity" | "foodSatisfaction" | "populationOverlay"
-  >("populationOverlay");  // Default to overlay view
+  >("populationOverlay");
   const [autoPlay, setAutoPlay] = useState(true);
   const [zoomLevel, setZoomLevel] = useState(1);
 
@@ -61,44 +51,64 @@ export const App: React.FC = () => {
 
   // Refs for controlling the simulation loop
   const isRunningRef = useRef(false);
+  const pendingResolve = useRef<((data: any) => void) | null>(null);
 
-  // Check server status
+  // Initialize Pyodide worker
   useEffect(() => {
-    checkServerStatus();
+    const worker = new Worker("/pyodide-worker.js");
+    workerRef.current = worker;
+
+    worker.onmessage = (event) => {
+      const { type, data, message, error } = event.data;
+
+      switch (type) {
+        case "status":
+          setLoadingMessage(message);
+          break;
+        case "ready":
+          setPyodideStatus("ready");
+          // Request initial biomass
+          worker.postMessage({ type: "getInitialBiomass" });
+          break;
+        case "initialBiomass":
+          setInitialBiomass(data.biomass);
+          setCellSizeKm(data.cell_size_km);
+          setGridInfo({ width: data.width, height: data.height });
+          break;
+        case "state":
+          if (pendingResolve.current) {
+            pendingResolve.current(data);
+            pendingResolve.current = null;
+          }
+          break;
+        case "error":
+          console.error("Worker error:", error);
+          if (pendingResolve.current) {
+            pendingResolve.current(null);
+            pendingResolve.current = null;
+          }
+          break;
+      }
+    };
+
+    worker.onerror = (error) => {
+      console.error("Worker error:", error);
+      setPyodideStatus("error");
+    };
+
+    // Start initialization
+    worker.postMessage({ type: "init" });
+
+    return () => {
+      worker.terminate();
+    };
   }, []);
 
-  const checkServerStatus = async () => {
-    setServerStatus("checking");
-    try {
-      const [healthRes, gridRes] = await Promise.all([
-        fetch(`${API_BASE}/health`),
-        fetch(`${API_BASE}/grid-info`),
-      ]);
-
-      if (healthRes.ok && gridRes.ok) {
-        const info = await gridRes.json();
-        setGridInfo(info);
-        setServerStatus("online");
-        loadInitialBiomass();
-      } else {
-        setServerStatus("offline");
-      }
-    } catch {
-      setServerStatus("offline");
-    }
-  };
-
-  const loadInitialBiomass = async () => {
-    try {
-      const response = await fetch(`${API_BASE}/initial-biomass`);
-      if (response.ok) {
-        const data = await response.json();
-        setInitialBiomass(data.biomass);
-        setCellSizeKm(data.metadata.cellSizeKm);
-      }
-    } catch (error) {
-      console.error("Failed to load initial biomass:", error);
-    }
+  const sendWorkerMessage = (message: any): Promise<any> => {
+    return new Promise((resolve) => {
+      pendingResolve.current = resolve;
+      workerRef.current?.postMessage(message);
+    });
   };
 
   const startSimulation = async () => {
@@ -107,119 +117,92 @@ export const App: React.FC = () => {
       return;
     }
 
-    try {
-      setIsRunning(true);
-      isRunningRef.current = true;
-      setYearStates([]);
-      setCurrentYear(0);
-      setViewingYear(0);
-      setLocationError(null);
+    // Check if clicking on water
+    if (initialBiomass && initialBiomass[startLocation.row]?.[startLocation.col] <= 0) {
+      setLocationError("Cannot start in water. Please select a location on land.");
+      return;
+    }
 
-      // Start new simulation session with selected start location
-      const response = await fetch(`${API_BASE}/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          config: {
-            initialization: {
-              totalPopulation: initialPopulation,
-            },
-          },
-          startCoordinates: startLocation,
-        }),
-      });
+    setIsRunning(true);
+    isRunningRef.current = true;
+    setYearStates([]);
+    setCurrentYear(0);
+    setViewingYear(0);
+    setLocationError(null);
 
-      if (!response.ok) {
-        const error = await response.json();
-        setLocationError(error.message || "Failed to start simulation");
-        setIsRunning(false);
-        isRunningRef.current = false;
-        return;
-      }
+    const startTime = performance.now();
+    const data = await sendWorkerMessage({
+      type: "start",
+      payload: {
+        row: startLocation.row,
+        col: startLocation.col,
+        totalPopulation: initialPopulation,
+      },
+    });
 
-      const data = await response.json();
-      setCellSizeKm(data.metadata.cellSizeKm);
-
-      const initialState: YearState = {
-        year: 0,
-        biomass: data.state.biomass,
-        population: data.state.population,
-        foodSatisfaction: data.state.foodSatisfaction,
-        carryingCapacity: data.state.carryingCapacity,
-      };
-
-      setYearStates([initialState]);
-      setSelectedVariable("populationOverlay");
-
-      // Start the simulation loop
-      runSimulationLoop();
-    } catch (error) {
-      console.error("Failed to start simulation:", error);
+    if (!data) {
+      setLocationError("Failed to start simulation");
       setIsRunning(false);
       isRunningRef.current = false;
+      return;
     }
+
+    setStepTime(performance.now() - startTime);
+    setTotalPopulation(Math.round(data.total_population));
+
+    const initialState: YearState = {
+      year: 0,
+      biomass: data.biomass,
+      population: data.population,
+    };
+
+    setYearStates([initialState]);
+    setSelectedVariable("populationOverlay");
+
+    // Start the simulation loop
+    runSimulationLoop();
   };
 
   const runSimulationLoop = useCallback(async () => {
     while (isRunningRef.current) {
-      try {
-        const response = await fetch(`${API_BASE}/step`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ years: yearsPerStep }),
-        });
+      const startTime = performance.now();
 
-        if (!response.ok) {
-          const error = await response.json();
-          console.error("Step failed:", error);
-          break;
-        }
+      const data = await sendWorkerMessage({
+        type: "step",
+        payload: { years: yearsPerStep },
+      });
 
-        const data = await response.json();
-        setStepTime(data.stepTimeMs);
-
-        const newState: YearState = {
-          year: data.year,
-          biomass: data.state.biomass,
-          population: data.state.population,
-          foodSatisfaction: data.state.foodSatisfaction,
-          carryingCapacity: data.state.carryingCapacity,
-        };
-
-        // Calculate total population from the grid
-        const popSum = data.state.population.reduce(
-          (sum: number, row: number[]) => sum + row.reduce((s: number, v: number) => s + v, 0),
-          0
-        );
-        setTotalPopulation(Math.round(popSum));
-
-        setYearStates((prev) => [...prev, newState]);
-        setCurrentYear(data.year);
-
-        if (autoPlay) {
-          setViewingYear(data.year);
-        }
-
-        // Small delay to prevent overwhelming the server
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      } catch (error) {
-        console.error("Simulation loop error:", error);
+      if (!data) {
+        console.error("Step failed");
         break;
       }
+
+      setStepTime(performance.now() - startTime);
+      setTotalPopulation(Math.round(data.total_population));
+
+      const newState: YearState = {
+        year: data.year,
+        biomass: data.biomass,
+        population: data.population,
+      };
+
+      setYearStates((prev) => [...prev, newState]);
+      setCurrentYear(data.year);
+
+      if (autoPlay) {
+        setViewingYear(data.year);
+      }
+
+      // Small delay for UI responsiveness
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
 
     setIsRunning(false);
   }, [autoPlay, yearsPerStep]);
 
-  const stopSimulation = async () => {
+  const stopSimulation = () => {
     isRunningRef.current = false;
     setIsRunning(false);
-
-    try {
-      await fetch(`${API_BASE}/stop`, { method: "POST" });
-    } catch (error) {
-      console.error("Failed to stop simulation:", error);
-    }
   };
 
   const resetSimulation = () => {
@@ -235,7 +218,6 @@ export const App: React.FC = () => {
   };
 
   const handleCellClick = (row: number, col: number) => {
-    // Only allow selecting start location before simulation starts
     if (yearStates.length === 0 && !isRunning) {
       setStartLocation({ row, col });
       setLocationError(null);
@@ -247,6 +229,7 @@ export const App: React.FC = () => {
     const yearData = yearStates[viewingYear];
 
     if (yearData) {
+      const emptyGrid = yearData.biomass.map((row) => row.map(() => 0));
       return {
         year: yearData.year,
         biomass: {
@@ -257,9 +240,9 @@ export const App: React.FC = () => {
         },
         bison: {
           population: NumericGrid.fromArray(yearData.population, cellSizeKm),
-          foodDemand: NumericGrid.fromArray(yearData.population, cellSizeKm),
-          foodSatisfaction: NumericGrid.fromArray(yearData.foodSatisfaction, cellSizeKm),
-          carryingCapacity: NumericGrid.fromArray(yearData.carryingCapacity, cellSizeKm),
+          foodDemand: NumericGrid.fromArray(emptyGrid, cellSizeKm),
+          foodSatisfaction: NumericGrid.fromArray(emptyGrid, cellSizeKm),
+          carryingCapacity: NumericGrid.fromArray(emptyGrid, cellSizeKm),
         },
       };
     }
@@ -302,15 +285,15 @@ export const App: React.FC = () => {
             </p>
           </div>
 
-          {/* Server Status */}
+          {/* Status */}
           <div className="card" style={{ display: "flex", alignItems: "center", gap: "12px", padding: "12px 20px" }}>
             <span
-              className={`status-dot ${serverStatus === "online" ? "online" : serverStatus === "offline" ? "offline" : "loading"}`}
+              className={`status-dot ${pyodideStatus === "ready" ? "online" : pyodideStatus === "error" ? "offline" : "loading"}`}
             />
             <span style={{ color: "#94a3b8" }}>
-              {serverStatus === "online" && "Server Online"}
-              {serverStatus === "offline" && "Server Offline"}
-              {serverStatus === "checking" && "Connecting..."}
+              {pyodideStatus === "ready" && "Ready (In-Browser)"}
+              {pyodideStatus === "error" && "Error Loading"}
+              {pyodideStatus === "loading" && loadingMessage}
             </span>
             {gridInfo && (
               <span style={{ color: "#64748b", fontSize: "13px" }}>
@@ -332,8 +315,6 @@ export const App: React.FC = () => {
                   { id: "biomass", label: "Biomass" },
                   { id: "populationOverlay", label: "Population + Land" },
                   { id: "population", label: "Population Only" },
-                  { id: "carryingCapacity", label: "Carrying Capacity" },
-                  { id: "foodSatisfaction", label: "Food Satisfaction" },
                 ].map((v) => (
                   <button
                     key={v.id}
@@ -389,15 +370,27 @@ export const App: React.FC = () => {
                 maxHeight: "600px",
               }}
             >
-              <div style={{ transform: `scale(${zoomLevel})`, transformOrigin: "top center" }}>
-                <SimulationCanvas
-                  state={displayState}
-                  variable={selectedVariable}
-                  visualizationService={container.visualizationService}
-                  onCellClick={handleCellClick}
-                  startMarker={yearStates.length === 0 ? startLocation : null}
-                />
-              </div>
+              {pyodideStatus === "loading" ? (
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "400px", color: "#94a3b8" }}>
+                  <div className="progress-bar" style={{ width: "200px", marginBottom: "16px" }}>
+                    <div className="progress-bar-fill" style={{ width: "100%", animation: "pulse 1s infinite" }} />
+                  </div>
+                  <p>{loadingMessage}</p>
+                  <p style={{ fontSize: "12px", color: "#64748b", marginTop: "8px" }}>
+                    First load takes ~10 seconds to initialize Python in your browser
+                  </p>
+                </div>
+              ) : (
+                <div style={{ transform: `scale(${zoomLevel})`, transformOrigin: "top center" }}>
+                  <SimulationCanvas
+                    state={displayState}
+                    variable={selectedVariable}
+                    visualizationService={container.visualizationService}
+                    onCellClick={handleCellClick}
+                    startMarker={yearStates.length === 0 ? startLocation : null}
+                  />
+                </div>
+              )}
             </div>
 
             {/* Year Slider */}
@@ -494,7 +487,7 @@ export const App: React.FC = () => {
                   <button
                     className="btn btn-primary"
                     onClick={startSimulation}
-                    disabled={serverStatus !== "online" || !startLocation}
+                    disabled={pyodideStatus !== "ready" || !startLocation}
                     style={{ width: "100%", padding: "14px" }}
                   >
                     Start Simulation
@@ -515,8 +508,8 @@ export const App: React.FC = () => {
                   <>
                     <button
                       className="btn btn-primary"
-                      onClick={startSimulation}
-                      disabled={serverStatus !== "online"}
+                      onClick={() => { isRunningRef.current = true; setIsRunning(true); runSimulationLoop(); }}
+                      disabled={pyodideStatus !== "ready"}
                       style={{ width: "100%", padding: "14px" }}
                     >
                       Continue Simulation
@@ -533,7 +526,7 @@ export const App: React.FC = () => {
               </div>
 
               {/* Years Per Step Control */}
-              <div style={{ marginBottom: "16px", padding: "12px", background: "#0f172a", borderRadius: "8px" }}>
+              <div style={{ marginTop: "16px", padding: "12px", background: "#0f172a", borderRadius: "8px" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
                   <span style={{ color: "#94a3b8", fontSize: "13px" }}>Years per step:</span>
                   <span style={{ color: "#f1f5f9", fontSize: "14px", fontWeight: "bold" }}>{yearsPerStep}</span>
@@ -567,7 +560,7 @@ export const App: React.FC = () => {
                   {stepTime && (
                     <div style={{ display: "flex", justifyContent: "space-between", color: "#94a3b8", fontSize: "13px", marginTop: "8px" }}>
                       <span>Step Time</span>
-                      <span style={{ color: "#f1f5f9" }}>{(stepTime / 1000).toFixed(2)}s</span>
+                      <span style={{ color: "#f1f5f9" }}>{stepTime.toFixed(0)}ms</span>
                     </div>
                   )}
                   {isRunning && (
@@ -600,8 +593,8 @@ export const App: React.FC = () => {
 
               {!showMethodology ? (
                 <p style={{ margin: "12px 0 0", color: "#94a3b8", fontSize: "13px", lineHeight: "1.6" }}>
-                  This simulation models bison population dynamics using satellite-derived
-                  biomass data and scientifically-based ecological parameters.
+                  This simulation runs entirely in your browser using Python (via Pyodide/WebAssembly).
+                  No server required - your data stays local.
                   {yearStates.length === 0 && (
                     <span style={{ display: "block", marginTop: "8px", color: "#64748b", fontStyle: "italic" }}>
                       Click on the map to select a starting location, then start the simulation.
@@ -610,10 +603,15 @@ export const App: React.FC = () => {
                 </p>
               ) : (
                 <div style={{ marginTop: "12px", color: "#94a3b8", fontSize: "12px", lineHeight: "1.7" }}>
-                  <h4 style={{ color: "#f1f5f9", fontSize: "14px", margin: "0 0 8px" }}>Data Sources</h4>
+                  <h4 style={{ color: "#f1f5f9", fontSize: "14px", margin: "0 0 8px" }}>Browser-Based Simulation</h4>
                   <p style={{ margin: "0 0 12px" }}>
-                    Biomass data derived from satellite imagery of Alaska, processed with plant-type-specific
-                    digestibility factors based on Poquérusse et al. (2024):
+                    This app uses <strong>Pyodide</strong> to run Python directly in your browser via WebAssembly.
+                    The simulation uses NumPy and SciPy for efficient array operations.
+                  </p>
+
+                  <h4 style={{ color: "#f1f5f9", fontSize: "14px", margin: "16px 0 8px" }}>Data Sources</h4>
+                  <p style={{ margin: "0 0 12px" }}>
+                    Biomass data derived from satellite imagery of Alaska, processed with digestibility factors:
                   </p>
                   <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
                     <li>Forbs: 80% digestibility</li>
@@ -621,79 +619,23 @@ export const App: React.FC = () => {
                     <li>Deciduous shrubs: 30% digestibility</li>
                   </ul>
 
-                  <h4 style={{ color: "#f1f5f9", fontSize: "14px", margin: "16px 0 8px" }}>Initial Population</h4>
-                  <p style={{ margin: "0 0 8px" }}>
-                    Simulates a realistic reintroduction scenario:
-                  </p>
-                  <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
-                    <li><strong>Founding population:</strong> Configurable 10-500 bison</li>
-                    <li><strong>Release area:</strong> Automatically scaled based on population size and local habitat quality</li>
-                    <li><strong>Distribution:</strong> Weighted by both distance from center and local biomass quality</li>
-                    <li><strong>Adaptive placement:</strong> Bison preferentially placed in higher-quality habitat cells</li>
-                  </ul>
-
-                  <h4 style={{ color: "#f1f5f9", fontSize: "14px", margin: "16px 0 8px" }}>Bison Parameters</h4>
-                  <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
-                    <li><strong>Body mass:</strong> ~700 kg average (males ~900kg, females ~500kg)</li>
-                    <li><strong>Daily intake:</strong> 2% of body mass (~14 kg dry matter/day, ~5.1 tonnes/year)</li>
-                    <li><strong>Maximum growth rate:</strong> 10% per year under optimal conditions</li>
-                    <li><strong>Observed growth:</strong> 5-7% per year in simulation (matches Yellowstone data)</li>
-                    <li><strong>Starvation threshold:</strong> Population declines when food satisfaction &lt;20%</li>
-                  </ul>
-
                   <h4 style={{ color: "#f1f5f9", fontSize: "14px", margin: "16px 0 8px" }}>Population Dynamics</h4>
-                  <p style={{ margin: "0 0 8px" }}>
-                    The model uses a modified logistic growth equation calibrated to Yellowstone bison data:
-                  </p>
-                  <div style={{ background: "#0f172a", padding: "8px 12px", borderRadius: "4px", fontFamily: "monospace", marginBottom: "12px" }}>
-                    dN/dt = rN(1 - N/K) × f(food)
-                  </div>
                   <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
-                    <li><strong>Growth rate (r):</strong> 10% max, calibrated to observed 4-8% in Yellowstone</li>
-                    <li><strong>Carrying capacity (K):</strong> Based on sustainable harvest of digestible biomass</li>
-                    <li><strong>Allee effect:</strong> Sparse populations (&lt;0.05/cell) decline due to mate-finding difficulty</li>
-                    <li><strong>Density dependence:</strong> Growth slows as population approaches carrying capacity</li>
-                  </ul>
-
-                  <h4 style={{ color: "#f1f5f9", fontSize: "14px", margin: "16px 0 8px" }}>Migration</h4>
-                  <p style={{ margin: "0 0 8px" }}>
-                    Bison migrate using FFT-based diffusion with habitat preference:
-                  </p>
-                  <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
-                    <li><strong>Annual range:</strong> ~50 km typical migration distance</li>
-                    <li><strong>Diffusion rate:</strong> 15% of population spreads to adjacent cells per year</li>
-                    <li><strong>Habitat preference:</strong> Biased movement toward higher carrying capacity</li>
-                    <li><strong>Barriers:</strong> Water (biomass = 0) blocks movement</li>
-                  </ul>
-
-                  <h4 style={{ color: "#f1f5f9", fontSize: "14px", margin: "16px 0 8px" }}>Carrying Capacity</h4>
-                  <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
-                    <li><strong>Utilization factor:</strong> 50% of digestible biomass sustainably harvestable</li>
-                    <li><strong>Biomass regrowth:</strong> 40% of deficit recovers per year</li>
-                    <li><strong>Per-cell capacity:</strong> Varies by habitat (0.1-2+ bison/km²)</li>
+                    <li><strong>Growth rate:</strong> 10% max, observed 5-7% (matches Yellowstone)</li>
+                    <li><strong>Body mass:</strong> ~700 kg average</li>
+                    <li><strong>Daily intake:</strong> 2% of body mass (~5.1 tonnes/year)</li>
+                    <li><strong>Migration:</strong> FFT-based diffusion, 15% spread rate</li>
+                    <li><strong>Allee effect:</strong> Sparse populations decline</li>
                   </ul>
 
                   <h4 style={{ color: "#f1f5f9", fontSize: "14px", margin: "16px 0 8px" }}>Model Validation</h4>
-                  <p style={{ margin: "0 0 8px" }}>
-                    Growth rates calibrated against Yellowstone National Park bison population studies:
-                  </p>
                   <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
-                    <li><strong>Observed λ:</strong> 1.04-1.08 (4-8% annual growth)</li>
-                    <li><strong>Simulated λ:</strong> 1.05-1.07 (5-7% annual growth)</li>
-                    <li><strong>Adult survival:</strong> ~92% per year (implicit in growth rate)</li>
-                  </ul>
-
-                  <h4 style={{ color: "#f1f5f9", fontSize: "14px", margin: "16px 0 8px" }}>Limitations</h4>
-                  <ul style={{ margin: "0", paddingLeft: "20px" }}>
-                    <li>No predation or disease mortality modeled</li>
-                    <li>Seasonal variation not included (annual timestep)</li>
-                    <li>No age/sex structure in population</li>
-                    <li>Climate variation not modeled</li>
+                    <li><strong>Observed λ (Yellowstone):</strong> 1.04-1.08 (4-8%/year)</li>
+                    <li><strong>Simulated λ:</strong> 1.05-1.07 (5-7%/year)</li>
                   </ul>
 
                   <p style={{ margin: "16px 0 0", color: "#64748b", fontSize: "11px", fontStyle: "italic" }}>
-                    Sources: Meagher (1986), Plumb & Dodd (1993), Yellowstone NPS Bison Ecology,
-                    Hobbs et al. (2015) Population Demography of Yellowstone Bison
+                    Sources: Meagher (1986), Yellowstone NPS, Hobbs et al. (2015)
                   </p>
                 </div>
               )}
@@ -736,9 +678,7 @@ export const App: React.FC = () => {
                 <>
                   <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                     <div style={{ flex: 1, height: "12px", borderRadius: "4px", background: selectedVariable === "biomass" ? "linear-gradient(90deg, #f7fcf5, #00441b)" :
-                      selectedVariable === "population" ? "linear-gradient(90deg, #0d0887, #7e03a8, #cc4778, #f89540, #f0f921)" :
-                      selectedVariable === "carryingCapacity" ? "linear-gradient(90deg, #ffffe5, #662506)" :
-                      "linear-gradient(90deg, #a50026, #f46d43, #fee08b, #66bd63, #006837)" }} />
+                      "linear-gradient(90deg, #0d0887, #7e03a8, #cc4778, #f89540, #f0f921)" }} />
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginTop: "4px", color: "#64748b", fontSize: "11px" }}>
                     <span>Low</span>
