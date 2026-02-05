@@ -612,7 +612,7 @@ export const App: React.FC = () => {
                 <div style={{ marginTop: "12px", color: "#94a3b8", fontSize: "12px", lineHeight: "1.7" }}>
                   <h4 style={{ color: "#f1f5f9", fontSize: "14px", margin: "0 0 8px" }}>Data Sources</h4>
                   <p style={{ margin: "0 0 12px" }}>
-                    Biomass data derived from satellite imagery of Alaska, processed with plant-type-specific
+                    Biomass data derived from 2020 satellite imagery survey of Alaska, processed with plant-type-specific
                     digestibility factors based on Poquérusse et al. (2024):
                   </p>
                   <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
