@@ -193,12 +193,14 @@ export const App: React.FC = () => {
         );
         setTotalPopulation(Math.round(popSum));
 
-        setYearStates((prev) => [...prev, newState]);
+        setYearStates((prev) => {
+          const newStates = [...prev, newState];
+          if (autoPlay) {
+            setViewingYear(newStates.length - 1);
+          }
+          return newStates;
+        });
         setCurrentYear(data.year);
-
-        if (autoPlay) {
-          setViewingYear(data.year);
-        }
 
         // Small delay to prevent overwhelming the server
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -405,7 +407,7 @@ export const App: React.FC = () => {
               <div style={{ marginTop: "16px" }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
                   <span style={{ color: "#94a3b8", fontSize: "14px" }}>
-                    Year: <strong style={{ color: "#f1f5f9" }}>{viewingYear}</strong>
+                    Year: <strong style={{ color: "#f1f5f9" }}>{yearStates[viewingYear]?.year ?? 0}</strong>
                   </span>
                   <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "#94a3b8", fontSize: "13px" }}>
                     <input
