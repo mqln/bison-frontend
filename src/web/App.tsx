@@ -472,21 +472,21 @@ export const App: React.FC = () => {
                 <div style={{ marginBottom: "16px", padding: "12px", background: "#0f172a", borderRadius: "8px" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
                     <span style={{ color: "#94a3b8", fontSize: "13px" }}>Initial Population:</span>
-                    <span style={{ color: "#f1f5f9", fontSize: "14px", fontWeight: "bold" }}>{initialPopulation} bison</span>
+                    <span style={{ color: "#f1f5f9", fontSize: "14px", fontWeight: "bold" }}>{initialPopulation.toLocaleString()} bison</span>
                   </div>
                   <input
                     type="range"
                     min={10}
-                    max={500}
-                    step={10}
+                    max={20000}
+                    step={initialPopulation < 500 ? 10 : 500}
                     value={initialPopulation}
                     onChange={(e) => setInitialPopulation(parseInt(e.target.value))}
                     style={{ width: "100%" }}
                   />
                   <div style={{ display: "flex", justifyContent: "space-between", marginTop: "4px", color: "#64748b", fontSize: "11px" }}>
                     <span>10</span>
-                    <span>Realistic: 20-100</span>
-                    <span>500</span>
+                    <span>Small release: 20-100 | Large: 5k-20k</span>
+                    <span>20k</span>
                   </div>
                 </div>
               )}
@@ -628,7 +628,7 @@ export const App: React.FC = () => {
                     Simulates a realistic reintroduction scenario:
                   </p>
                   <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
-                    <li><strong>Founding population:</strong> Configurable 10-500 bison</li>
+                    <li><strong>Founding population:</strong> Configurable 10-20,000 bison</li>
                     <li><strong>Release area:</strong> Automatically scaled based on population size and local habitat quality</li>
                     <li><strong>Distribution:</strong> Weighted by both distance from center and local biomass quality</li>
                     <li><strong>Adaptive placement:</strong> Bison preferentially placed in higher-quality habitat cells</li>
@@ -638,8 +638,8 @@ export const App: React.FC = () => {
                   <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
                     <li><strong>Body mass:</strong> ~700 kg average (males ~900kg, females ~500kg)</li>
                     <li><strong>Daily intake:</strong> 2% of body mass (~14 kg dry matter/day, ~5.1 tonnes/year)</li>
-                    <li><strong>Maximum growth rate:</strong> 10% per year under optimal conditions</li>
-                    <li><strong>Observed growth:</strong> 5-7% per year in simulation (matches Yellowstone data)</li>
+                    <li><strong>Maximum growth rate:</strong> 20% per year under optimal conditions (matches Yukon reintroduction data)</li>
+                    <li><strong>Observed growth:</strong> 10-20% in open habitat, 5-7% in saturated habitat (Yellowstone-level)</li>
                     <li><strong>Starvation threshold:</strong> Population declines when food satisfaction &lt;20%</li>
                   </ul>
 
@@ -651,7 +651,7 @@ export const App: React.FC = () => {
                     dN/dt = rN(1 - N/K) × f(food)
                   </div>
                   <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
-                    <li><strong>Growth rate (r):</strong> 10% max, calibrated to observed 4-8% in Yellowstone</li>
+                    <li><strong>Growth rate (r):</strong> 20% max, calibrated to Yukon reintroduction (~20%) and Yellowstone (4-8% at capacity)</li>
                     <li><strong>Carrying capacity (K):</strong> Based on sustainable harvest of digestible biomass</li>
                     <li><strong>Allee effect:</strong> Sparse populations (&lt;0.05/cell) decline due to mate-finding difficulty</li>
                     <li><strong>Density dependence:</strong> Growth slows as population approaches carrying capacity</li>
@@ -662,8 +662,8 @@ export const App: React.FC = () => {
                     Bison migrate using FFT-based diffusion with habitat preference:
                   </p>
                   <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
-                    <li><strong>Annual range:</strong> ~50 km typical migration distance</li>
-                    <li><strong>Diffusion rate:</strong> 15% of population spreads to adjacent cells per year</li>
+                    <li><strong>Annual range:</strong> ~200 km seasonal migration distance (bison cover 100-300km seasonally)</li>
+                    <li><strong>Diffusion rate:</strong> 35% of frontier population spreads to adjacent cells per year</li>
                     <li><strong>Habitat preference:</strong> Biased movement toward higher carrying capacity</li>
                     <li><strong>Barriers:</strong> Water (biomass = 0) blocks movement</li>
                   </ul>
@@ -677,11 +677,12 @@ export const App: React.FC = () => {
 
                   <h4 style={{ color: "#f1f5f9", fontSize: "14px", margin: "16px 0 8px" }}>Model Validation</h4>
                   <p style={{ margin: "0 0 8px" }}>
-                    Growth rates calibrated against Yellowstone National Park bison population studies:
+                    Growth rates calibrated against multiple bison population studies:
                   </p>
                   <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
-                    <li><strong>Observed λ:</strong> 1.04-1.08 (4-8% annual growth)</li>
-                    <li><strong>Simulated λ:</strong> 1.05-1.07 (5-7% annual growth)</li>
+                    <li><strong>Yukon reintroduction:</strong> ~20%/year growth in good open habitat</li>
+                    <li><strong>Yellowstone (at capacity):</strong> λ 1.04-1.08 (4-8% annual growth)</li>
+                    <li><strong>Simulated λ:</strong> Up to 1.20 in open habitat, settling to 1.05-1.07 near capacity</li>
                     <li><strong>Adult survival:</strong> ~92% per year (implicit in growth rate)</li>
                   </ul>
 
@@ -695,7 +696,8 @@ export const App: React.FC = () => {
 
                   <p style={{ margin: "16px 0 0", color: "#64748b", fontSize: "11px", fontStyle: "italic" }}>
                     Sources: Meagher (1986), Plumb & Dodd (1993), Yellowstone NPS Bison Ecology,
-                    Hobbs et al. (2015) Population Demography of Yellowstone Bison
+                    Hobbs et al. (2015) Population Demography of Yellowstone Bison,
+                    Yukon Wood Bison Recovery Program
                   </p>
                 </div>
               )}
