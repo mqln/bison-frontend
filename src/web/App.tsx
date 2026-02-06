@@ -664,6 +664,7 @@ export const App: React.FC = () => {
                   <ul style={{ margin: "0 0 12px", paddingLeft: "20px" }}>
                     <li><strong>Annual range:</strong> ~200 km seasonal migration distance (bison cover 100-300km seasonally)</li>
                     <li><strong>Diffusion rate:</strong> 35% of frontier population spreads to adjacent cells per year</li>
+                    <li><strong>Spread pattern:</strong> Distance-weighted kernel (d⁻¹·⁵ decay) — most of the herd stays concentrated while frontier groups push further, reflecting natural herd cohesion</li>
                     <li><strong>Habitat preference:</strong> Biased movement toward higher carrying capacity</li>
                     <li><strong>Barriers:</strong> Water (biomass = 0) blocks movement</li>
                   </ul>
